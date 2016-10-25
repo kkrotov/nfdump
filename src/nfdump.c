@@ -54,6 +54,7 @@
 #include <sys/resource.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <libpq-fe.h>
 
 #ifdef HAVE_STDINT_H
 #include <stdint.h>
@@ -79,6 +80,9 @@
 #include "ipconv.h"
 #include "util.h"
 #include "flist.h"
+
+PGconn * pgConn=NULL;
+char *csvfile = "/tmp/nfdump.csv";
 
 /* hash parameters */
 #define NumPrealloc 128000
@@ -228,6 +232,7 @@ printmap_t printmap[] = {
 	{ "pipe", 		flow_record_to_pipe,      	NULL 			},
 	{ "csv", 		flow_record_to_csv,      	NULL 			},
 	{ "null", 		flow_record_to_null,      	NULL 			},
+//    { "pgsql",      flow_record_to_pgsql,       NULL            },
 #ifdef NSEL
 	{ "nsel",		format_special, 			FORMAT_nsel		},
 	{ "nel",		format_special, 			FORMAT_nel		},
@@ -313,6 +318,19 @@ static void usage(char *name) {
 					"\t\tyyyy/MM/dd.hh:mm:ss[-yyyy/MM/dd.hh:mm:ss]\n", name);
 } /* usage */
 
+void CopyNetFlow (char *rel_name, char *filename) {
+
+    char sql[4096];
+    set_record_header();
+    snprintf (sql, sizeof(sql), "COPY %s FROM '%s' DELIMITER ',' CSV header", rel_name, filename);
+    PGresult *res = PQexec(pgConn, sql);
+    if (PQresultStatus(res) != PGRES_COMMAND_OK) {
+
+        LogError("Error inserting data record\n");
+        PQfinish(pgConn);
+        exit(255);
+    }
+}
 
 static void PrintSummary(stat_record_t *stat_record, int plain_numbers, int csv_output) {
 static double	duration;
@@ -610,6 +628,7 @@ int	v1_map_done = 0;
 										printf("%s\n", string);
 								} else 
 									printf("%s\n", string);
+                                fflush(stdout);
 							}
 						} else { 
 							// mutually exclusive conditions should prevent executing this code
@@ -717,6 +736,7 @@ int			plain_numbers, GuessDir, pipe_output, csv_output;
 time_t 		t_start, t_end;
 uint32_t	limitflows;
 char 		Ident[IDENTLEN];
+    char *pg_conn_string = NULL;
 
 	rfile = Rfile = Mdirs = wfile = ffile = filter = tstring = stat_type = NULL;
 	byte_limit_string = packet_limit_string = NULL;
@@ -757,7 +777,7 @@ char 		Ident[IDENTLEN];
 
 	Ident[0] = '\0';
 
-	while ((c = getopt(argc, argv, "6aA:Bbc:D:E:s:hHn:i:j:f:qzr:v:w:K:M:NImO:R:XZt:TVv:x:l:L:o:")) != EOF) {
+	while ((c = getopt(argc, argv, "6aA:Bbc:D:E:s:hHn:i:j:f:qzr:v:w:K:M:NImO:R:XZt:TVv:x:l:L:o:C:")) != EOF) {
 		switch (c) {
 			case 'h':
 				usage(argv[0]);
@@ -808,6 +828,9 @@ char 		Ident[IDENTLEN];
 			case 'z':
 				compress = 1;
 				break;
+            case 'C':
+                pg_conn_string = optarg;
+                break;
 			case 'c':	
 				limitflows = atoi(optarg);
 				if ( !limitflows ) {
@@ -999,6 +1022,21 @@ char 		Ident[IDENTLEN];
 		PrintStat(&sum_stat);
 		exit(0);
 	}
+    if (pg_conn_string) {
+
+        pgConn = PQconnectdb(pg_conn_string);
+        if (pgConn==NULL) {
+
+            LogError("Error connecting to database\n");
+            exit(255);
+        }
+        print_format = "csv";
+        if (freopen(csvfile,"w",stdout)==NULL) {
+
+            LogError("Error opening temporary csv file %s\n", csvfile);
+            exit(255);
+        }
+    }
 
 	// handle print mode
 	if ( !print_format ) {
@@ -1227,6 +1265,12 @@ char 		Ident[IDENTLEN];
 	Dispose_FlowTable();
 	Dispose_StatTable();
 	FreeExtensionMaps(extension_map_list);
+    if (pgConn) {
+
+        fclose (stdout);
+        CopyNetFlow ("nfdump", csvfile);
+        PQfinish(pgConn);
+    }
 
 #ifdef DEVEL
 	if ( hash_hit || hash_miss )
